@@ -24,6 +24,16 @@ in_out.add_argument('--architecture', required=False, choices=['pervaiz', 'he_se
                     default='pervaiz', help='BrainNetCNN architecture', nargs='?')
 in_out.add_argument("-t", "--tasks", required=False, type=str, default=[None],
                     help="name of task subdirectories in matrix_directory", nargs='+')
+in_out.add_argument('--dataset_type', choices=['matrix', 'hcp7task_fc'], default='matrix',
+                    help='dataset source type', nargs='?')
+in_out.add_argument('--subject_list', type=str, default=None,
+                    help='path to subject list file for HCP7Task FC data')
+in_out.add_argument('--task_config', type=str, default=None,
+                    help='JSON path for HCP7Task task config')
+in_out.add_argument('--fc_root', type=str, default=None,
+                    help='root directory of precomputed FC files for HCP7Task')
+in_out.add_argument('--roi_ids', type=str, default=None,
+                    help='comma-separated ROI ids (optional)')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')
@@ -95,6 +105,15 @@ def set_conditional_args():
 
 
 def exit_logic():
+    if uncond_args.dataset_type == 'hcp7task_fc':
+        if not uncond_args.subject_list:
+            raise ValueError('HCP7Task FC dataset requires --subject_list')
+        if not uncond_args.task_config:
+            raise ValueError('HCP7Task FC dataset requires --task_config')
+        if not uncond_args.fc_root:
+            raise ValueError('HCP7Task FC dataset requires --fc_root')
+        return
+
     mat_dir = os.path.join(input_dir, uncond_args.matrix_directory)
     task_dirs = [item for item in os.listdir(mat_dir) if os.path.isdir(os.path.join(mat_dir, item))]
     subject_info = pd.read_csv(f'{input_dir}/{sub_info_dir}/{uncond_args.matrix_directory}_subject_info.csv')
@@ -162,16 +181,20 @@ def train_models():
         print("\nTraining %s to predict %s from %s directory, with task(s) %s...\n" %
               (args.model, args.outcome_names, args.matrix_directory, args.tasks))
 
-    from preprocessing import load_data
-    pargs.update(load_data.main(pargs))
+    if args.dataset_type == 'hcp7task_fc':
+        from analysis import train_fc_models
+        train_fc_models.main(pargs)
+    else:
+        from preprocessing import load_data
+        pargs.update(load_data.main(pargs))
 
-    if args.model == ['BNCNN']:
-        from analysis import cv_train_BNCNN
-        cv_train_BNCNN.main(pargs)
+        if args.model == ['BNCNN']:
+            from analysis import cv_train_BNCNN
+            cv_train_BNCNN.main(pargs)
 
-    elif any(model in args.model for model in ['SVM', 'FC90', 'ElasticNet']):
-        from analysis import cv_train_1D_networks
-        cv_train_1D_networks.main(pargs)
+        elif any(model in args.model for model in ['SVM', 'FC90', 'ElasticNet']):
+            from analysis import cv_train_1D_networks
+            cv_train_1D_networks.main(pargs)
 
     print(f'\n{args.model[0]} training done!\n')
 
