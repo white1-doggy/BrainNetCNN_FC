@@ -497,6 +497,7 @@ class HeSexBNCNN(torch.nn.Module, YData):
         print('\nInitializing BNCNN: (He et al. 2018, Sex) BrainNetCNN architecture...')
         super(HeSexBNCNN, self).__init__()
         set_attrs_from_parent_instance(self, transformed_data, ['n_classes'])
+        self.multiclass = self.n_classes > 1
 
         self.in_planes = example.size(1)
         self.d = example.size(3)
@@ -518,7 +519,10 @@ class HeSexBNCNN(torch.nn.Module, YData):
         out = F.dropout(self.E2N(out), p=0.463)
         out = F.dropout(self.N2G(out), p=0.463)
         out = out.view(out.size(0), -1)
-        out = torch.sigmoid(self.dense1(out))
+        if self.multiclass and self.n_classes > 2:
+            out = self.dense1(out)
+        else:
+            out = torch.sigmoid(self.dense1(out))
 
         return out
 
@@ -561,7 +565,10 @@ class PervaizBNCNN(torch.nn.Module, YData):
         out = F.dropout(F.relu(self.dense2(out)), p=0.5)
 
         if self.multiclass:
-            out = torch.sigmoid(self.dense3(out))
+            if self.n_classes > 2:
+                out = self.dense3(out)
+            else:
+                out = torch.sigmoid(self.dense3(out))
         else:
             out = F.relu(self.dense3(out))
 
@@ -603,7 +610,10 @@ class KawaharaBNCNN(torch.nn.Module, YData):
         out = out.view(out.size(0), -1)
         out = F.relu(self.dense1(out))
         out = F.dropout(F.relu(self.dense2(out)), p=0.5)
-        out = F.relu(self.dense3(out))
+        if self.multiclass:
+            out = self.dense3(out)
+        else:
+            out = F.relu(self.dense3(out))
 
         return out
 
