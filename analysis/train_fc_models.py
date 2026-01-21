@@ -63,27 +63,39 @@ def _build_datasets(params):
     task_config = _load_task_config(params.task_config)
     train_subjects, val_subjects, test_subjects = _load_subject_splits(params.subject_list)
     roi_ids = params.roi_ids if getattr(params, "roi_ids", None) else None
+    task_list = [task for task in params.tasks if task] if getattr(params, "tasks", None) else None
+    label_from_dir = getattr(params, "label_from_dir", False)
 
     train_dataset = HCP7TaskDataset(
         subject_list=train_subjects,
         task_config=task_config,
         fc_root=params.fc_root,
         roi_ids=roi_ids,
+        task_list=task_list,
+        label_from_dir=label_from_dir,
     )
     val_dataset = HCP7TaskDataset(
         subject_list=val_subjects,
         task_config=task_config,
         fc_root=params.fc_root,
         roi_ids=roi_ids,
+        task_list=task_list,
+        label_from_dir=label_from_dir,
     )
     test_dataset = HCP7TaskDataset(
         subject_list=test_subjects,
         task_config=task_config,
         fc_root=params.fc_root,
         roi_ids=roi_ids,
+        task_list=task_list,
+        label_from_dir=label_from_dir,
     )
 
-    num_classes = len(task_config["task_name_list"])
+    if label_from_dir:
+        train_labels = [label.item() for _, label in train_dataset]
+        num_classes = int(max(train_labels)) + 1 if train_labels else 0
+    else:
+        num_classes = len(task_config["task_name_list"])
     return train_dataset, val_dataset, test_dataset, num_classes
 
 

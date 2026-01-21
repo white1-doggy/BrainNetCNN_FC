@@ -15,12 +15,16 @@ class HCP7TaskDataset(Dataset):
         task_config,
         fc_root,
         roi_ids=None,
+        task_list=None,
+        label_from_dir=False,
     ):
         self.subject_list = list(subject_list)
         self.task_config = self._load_task_config(task_config)
-        self.task_name_list = self.task_config["task_name_list"]
+        all_tasks = self.task_config["task_name_list"]
+        self.task_name_list = task_list if task_list else all_tasks
         self.fc_root = fc_root
         self.roi_ids = self._resolve_roi_ids(roi_ids)
+        self.label_from_dir = label_from_dir
         self.samples = self._build_fc_index()
         self.num_rois = self._infer_num_rois()
 
@@ -115,7 +119,7 @@ class HCP7TaskDataset(Dataset):
         item = self.samples[idx]
         fc = self._load_fc(item["fc_path"])
         fc = self._maybe_select_rois(fc)
-        label = self.task_config["task_name_to_id"][item["task"]]
+        label = self._resolve_label(item)
         return fc.unsqueeze(0), torch.tensor(label, dtype=torch.long)
 
     def _infer_num_rois(self):
@@ -125,3 +129,22 @@ class HCP7TaskDataset(Dataset):
         if self.roi_ids:
             sample_fc = self._maybe_select_rois(sample_fc)
         return int(sample_fc.shape[0])
+
+    def _resolve_label(self, item):
+        if not self.label_from_dir:
+            return self.task_config["task_name_to_id"][item["task"]]
+
+        label_value = item.get("label")
+        if label_value is None:
+            raise ValueError("label_from_dir=True requires label directories in fc_root.")
+
+        if isinstance(label_value, str) and label_value.isdigit():
+            return int(label_value)
+
+        rules = self.task_config.get("task_label_rules", {}).get(item["task"], {})
+        if "label_to_id" in rules:
+            return int(rules["label_to_id"][str(label_value)])
+        if "labels" in rules:
+            return int(rules["labels"].index(label_value))
+
+        raise ValueError(f"Unrecognized label mapping for task {item['task']}: {label_value}")

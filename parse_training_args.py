@@ -8,7 +8,7 @@ parser.add_argument("-v", "--verbose", help="increase output verbosity", action=
 # degrees of freedom in the model input/output
 in_out = parser.add_argument_group('in_out', 'model I/O params')
 in_out.add_argument("-on", "--outcome_names", required=True, type=str, nargs='+', help="the outcome to predict")
-in_out.add_argument("-md", "--matrix_directory", required=False, nargs='?',
+in_out.add_argument("-md", "--matrix_directory", required=False, nargs='?', default='hcp7task_fc',
                     help='matrix directory placeholder (unused for HCP7Task FC mode)')
 in_out.add_argument("-mo", "--model", required=True, choices=['BNCNN', 'SVM', 'FC90', 'ElasticNet'],
                     type=str, help='the model to use', nargs=1)
@@ -24,6 +24,8 @@ in_out.add_argument('--fc_root', type=str, default=None,
                     help='root directory of precomputed FC files for HCP7Task')
 in_out.add_argument('--roi_ids', type=str, default=None,
                     help='comma-separated ROI ids (optional)')
+in_out.add_argument('--label_from_dir', action='store_true',
+                    help='use label directories (e.g., 0/1) for task-specific binary classification')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')
