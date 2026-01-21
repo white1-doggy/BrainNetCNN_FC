@@ -4,6 +4,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
 class HCP7TaskDataset(Dataset):
@@ -46,7 +47,7 @@ class HCP7TaskDataset(Dataset):
     def _build_fc_index(self):
         samples = []
         subject_set = set(self.subject_list)
-        for subject in os.listdir(self.fc_root):
+        for subject in tqdm(os.listdir(self.fc_root), desc="Indexing FC data"):
             if subject_set and subject not in subject_set:
                 continue
             subject_dir = os.path.join(self.fc_root, subject)

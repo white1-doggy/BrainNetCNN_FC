@@ -8,8 +8,9 @@ import torch
 import torch.nn as nn
 from sklearn import neural_network, svm
 from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import balanced_accuracy_score, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from utils.hcp7task_dataset import HCP7TaskDataset
 from utils.util_args import models_dir, output_dir, performance_dir, seed
@@ -99,7 +100,7 @@ def _build_datasets(params):
     return train_dataset, val_dataset, test_dataset, num_classes
 
 
-def _build_flat_features(dataset):
+def _build_flat_features(dataset, desc=None):
     if len(dataset) == 0:
         return np.empty((0, 0)), np.empty((0,))
     sample_fc, _ = dataset[0]
@@ -107,7 +108,8 @@ def _build_flat_features(dataset):
     tri_idx = np.triu_indices(n, k=1)
     features = []
     labels = []
-    for fc, label in dataset:
+    data_iter = tqdm(dataset, desc=desc) if desc else dataset
+    for fc, label in data_iter:
         fc_np = fc.squeeze(0).numpy()
         features.append(fc_np[tri_idx])
         labels.append(label.item())
@@ -137,6 +139,29 @@ def _compute_class_weights(labels, num_classes):
     counts[counts == 0] = 1.0
     weights = counts.sum() / (num_classes * counts)
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def _predict_probabilities(outputs, num_classes):
+    if num_classes > 2:
+        return torch.softmax(outputs, dim=1).cpu().numpy()
+    return outputs.detach().cpu().numpy()
+
+
+def _compute_epoch_metrics(y_true, y_pred, y_prob, num_classes):
+    metrics = {
+        "acc": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average="binary" if num_classes == 2 else "macro", zero_division=0),
+        "recall": recall_score(y_true, y_pred, average="binary" if num_classes == 2 else "macro", zero_division=0),
+        "f1": f1_score(y_true, y_pred, average="binary" if num_classes == 2 else "macro", zero_division=0),
+    }
+    try:
+        if num_classes == 2:
+            metrics["auc"] = roc_auc_score(y_true, y_prob[:, 1])
+        else:
+            metrics["auc"] = roc_auc_score(y_true, y_prob, multi_class="ovr")
+    except ValueError:
+        metrics["auc"] = float("nan")
+    return metrics
 
 
 def _train_bncnn(params):
@@ -172,7 +197,8 @@ def _train_bncnn(params):
         model.train()
         train_loss = 0.0
         train_correct = 0
-        for inputs, labels in train_loader:
+        train_iter = tqdm(train_loader, desc=f"Epoch {epoch} [train]") if params.verbose else train_loader
+        for inputs, labels in train_iter:
             inputs = inputs.to(device)
             labels = labels.to(device)
             optimizer.zero_grad()
@@ -196,7 +222,8 @@ def _train_bncnn(params):
         val_loss = 0.0
         val_correct = 0
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            val_iter = tqdm(val_loader, desc=f"Epoch {epoch} [val]") if params.verbose else val_loader
+            for inputs, labels in val_iter:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 outputs = model(inputs)
@@ -213,6 +240,40 @@ def _train_bncnn(params):
         val_loss /= len(val_dataset)
         val_acc = val_correct / len(val_dataset)
         history.append(dict(epoch=epoch, train_loss=train_loss, val_loss=val_loss, train_acc=train_acc, val_acc=val_acc))
+
+        test_true = []
+        test_pred = []
+        test_prob = []
+        with torch.no_grad():
+            test_iter = tqdm(test_loader, desc=f"Epoch {epoch} [test]") if params.verbose else test_loader
+            for inputs, labels in test_iter:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                outputs = model(inputs)
+                probs = _predict_probabilities(outputs, num_classes)
+                preds = outputs.argmax(dim=1).cpu().numpy()
+                test_true.append(labels.cpu().numpy())
+                test_pred.append(preds)
+                test_prob.append(probs)
+
+        test_true = np.concatenate(test_true) if test_true else np.array([])
+        test_pred = np.concatenate(test_pred) if test_pred else np.array([])
+        test_prob = np.concatenate(test_prob) if test_prob else np.array([])
+        if test_true.size:
+            test_metrics = _compute_epoch_metrics(test_true, test_pred, test_prob, num_classes)
+        else:
+            test_metrics = {"acc": float("nan"), "auc": float("nan"), "precision": float("nan"),
+                            "recall": float("nan"), "f1": float("nan")}
+        history[-1].update({f"test_{k}": v for k, v in test_metrics.items()})
+        if params.verbose:
+            print(
+                "Test metrics - "
+                f"acc: {test_metrics['acc']:.4f}, "
+                f"auc: {test_metrics['auc']:.4f}, "
+                f"precision: {test_metrics['precision']:.4f}, "
+                f"recall: {test_metrics['recall']:.4f}, "
+                f"f1: {test_metrics['f1']:.4f}"
+            )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -241,9 +302,9 @@ def _train_bncnn(params):
 
 def _train_sklearn(params, model_name):
     train_dataset, val_dataset, test_dataset, num_classes = _build_datasets(params)
-    X_train, y_train = _build_flat_features(train_dataset)
-    X_val, y_val = _build_flat_features(val_dataset)
-    X_test, y_test = _build_flat_features(test_dataset)
+    X_train, y_train = _build_flat_features(train_dataset, desc="Loading train features")
+    X_val, y_val = _build_flat_features(val_dataset, desc="Loading val features")
+    X_test, y_test = _build_flat_features(test_dataset, desc="Loading test features")
 
     if model_name == "SVM":
         net = svm.SVC(kernel="linear", gamma="scale", class_weight="balanced", random_state=seed)
