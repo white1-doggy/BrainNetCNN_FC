@@ -164,6 +164,30 @@ def _compute_epoch_metrics(y_true, y_pred, y_prob, num_classes):
     return metrics
 
 
+def _sklearn_predict_proba(estimator, X, num_classes):
+    if hasattr(estimator, "predict_proba"):
+        return estimator.predict_proba(X)
+    scores = estimator.decision_function(X)
+    if num_classes == 2:
+        scores = scores.reshape(-1, 1)
+        prob_pos = 1 / (1 + np.exp(-scores))
+        return np.concatenate([1 - prob_pos, prob_pos], axis=1)
+    scores = scores - scores.max(axis=1, keepdims=True)
+    exp_scores = np.exp(scores)
+    return exp_scores / exp_scores.sum(axis=1, keepdims=True)
+
+
+def _print_metrics(prefix, metrics):
+    print(
+        f"{prefix} - "
+        f"acc: {metrics['acc']:.4f}, "
+        f"auc: {metrics['auc']:.4f}, "
+        f"precision: {metrics['precision']:.4f}, "
+        f"recall: {metrics['recall']:.4f}, "
+        f"f1: {metrics['f1']:.4f}"
+    )
+
+
 def _train_bncnn(params):
     train_dataset, val_dataset, test_dataset, num_classes = _build_datasets(params)
     example, _ = train_dataset[0]
@@ -266,14 +290,7 @@ def _train_bncnn(params):
                             "recall": float("nan"), "f1": float("nan")}
         history[-1].update({f"test_{k}": v for k, v in test_metrics.items()})
         if params.verbose:
-            print(
-                "Test metrics - "
-                f"acc: {test_metrics['acc']:.4f}, "
-                f"auc: {test_metrics['auc']:.4f}, "
-                f"precision: {test_metrics['precision']:.4f}, "
-                f"recall: {test_metrics['recall']:.4f}, "
-                f"f1: {test_metrics['f1']:.4f}"
-            )
+            _print_metrics("Test metrics", test_metrics)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -307,12 +324,12 @@ def _train_sklearn(params, model_name):
     X_test, y_test = _build_flat_features(test_dataset, desc="Loading test features")
 
     if model_name == "SVM":
-        net = svm.SVC(kernel="linear", gamma="scale", class_weight="balanced", random_state=seed)
+        net = svm.SVC(kernel="linear", gamma="scale", class_weight="balanced", random_state=seed, probability=True)
     elif model_name == "FC90":
         hidden_layers = (5, 6, 7, num_classes)
         net = neural_network.MLPClassifier(
             hidden_layer_sizes=hidden_layers,
-            max_iter=500,
+            max_iter=1,
             solver="sgd",
             learning_rate="adaptive",
             momentum=params.momentum,
@@ -320,18 +337,51 @@ def _train_sklearn(params, model_name):
             early_stopping=False,
             random_state=seed,
             verbose=params.verbose,
+            warm_start=True,
         )
     else:
-        net = SGDClassifier(penalty="elasticnet", l1_ratio=0.5, random_state=seed)
+        net = SGDClassifier(penalty="elasticnet", l1_ratio=0.5, random_state=seed, loss="log_loss")
 
-    net.fit(X_train, y_train)
-    test_pred = net.predict(X_test)
-    val_pred = net.predict(X_val)
-    train_pred = net.predict(X_train)
+    history = []
+    classes = np.unique(y_train)
+    if model_name in {"FC90", "ElasticNet"}:
+        epoch_iter = tqdm(range(params.n_epochs), desc=f"{model_name} epochs") if params.verbose else range(params.n_epochs)
+        for epoch in epoch_iter:
+            net.partial_fit(X_train, y_train, classes=classes)
+            train_pred = net.predict(X_train)
+            val_pred = net.predict(X_val)
+            test_pred = net.predict(X_test)
+            train_prob = _sklearn_predict_proba(net, X_train, num_classes)
+            val_prob = _sklearn_predict_proba(net, X_val, num_classes)
+            test_prob = _sklearn_predict_proba(net, X_test, num_classes)
 
-    test_bacc = balanced_accuracy_score(y_test, test_pred)
-    val_bacc = balanced_accuracy_score(y_val, val_pred)
-    train_bacc = balanced_accuracy_score(y_train, train_pred)
+            train_metrics = _compute_epoch_metrics(y_train, train_pred, train_prob, num_classes)
+            val_metrics = _compute_epoch_metrics(y_val, val_pred, val_prob, num_classes)
+            test_metrics = _compute_epoch_metrics(y_test, test_pred, test_prob, num_classes)
+            history.append(
+                dict(
+                    epoch=epoch,
+                    train=train_metrics,
+                    val=val_metrics,
+                    test=test_metrics,
+                )
+            )
+            if params.verbose:
+                _print_metrics(f"{model_name} epoch {epoch} [test]", test_metrics)
+    else:
+        net.fit(X_train, y_train)
+        train_pred = net.predict(X_train)
+        val_pred = net.predict(X_val)
+        test_pred = net.predict(X_test)
+        train_prob = _sklearn_predict_proba(net, X_train, num_classes)
+        val_prob = _sklearn_predict_proba(net, X_val, num_classes)
+        test_prob = _sklearn_predict_proba(net, X_test, num_classes)
+        train_metrics = _compute_epoch_metrics(y_train, train_pred, train_prob, num_classes)
+        val_metrics = _compute_epoch_metrics(y_val, val_pred, val_prob, num_classes)
+        test_metrics = _compute_epoch_metrics(y_test, test_pred, test_prob, num_classes)
+        history.append(dict(epoch=0, train=train_metrics, val=val_metrics, test=test_metrics))
+        if params.verbose:
+            _print_metrics(f"{model_name} [test]", test_metrics)
 
     outputs = dict(
         trainp=train_pred,
@@ -342,7 +392,12 @@ def _train_sklearn(params, model_name):
         testy=y_test,
     )
 
-    return net, outputs, dict(train_bacc=train_bacc, val_bacc=val_bacc, test_bacc=test_bacc)
+    test_bacc = balanced_accuracy_score(y_test, net.predict(X_test))
+    val_bacc = balanced_accuracy_score(y_val, net.predict(X_val))
+    train_bacc = balanced_accuracy_score(y_train, net.predict(X_train))
+
+    metrics = dict(train_bacc=train_bacc, val_bacc=val_bacc, test_bacc=test_bacc, history=history)
+    return net, outputs, metrics
 
 
 def main(args):
