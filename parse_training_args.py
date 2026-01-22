@@ -1,13 +1,5 @@
 import argparse
 import multiprocessing
-import os
-
-import pandas as pd
-
-from utils.util_args import multiclass_variables, input_dir, sub_info_dir
-
-if not os.listdir(input_dir) and all(elem == '__init__.py' for elem in os.listdir(input_dir)):
-    raise FileNotFoundError(f'Please add input data directory to the {input_dir} directory')
 
 parser = argparse.ArgumentParser(description="train multiple personality-predicting models on HCP data")
 
@@ -16,14 +8,26 @@ parser.add_argument("-v", "--verbose", help="increase output verbosity", action=
 # degrees of freedom in the model input/output
 in_out = parser.add_argument_group('in_out', 'model I/O params')
 in_out.add_argument("-on", "--outcome_names", required=True, type=str, nargs='+', help="the outcome to predict")
-in_out.add_argument("-md", "--matrix_directory", required=True, nargs='?',
-                    help='matrix directory containing matrix input data')
+in_out.add_argument("-md", "--matrix_directory", required=False, nargs='?', default='hcp7task_fc',
+                    help='matrix directory placeholder (unused for HCP7Task FC mode)')
 in_out.add_argument("-mo", "--model", required=True, choices=['BNCNN', 'SVM', 'FC90', 'ElasticNet'],
                     type=str, help='the model to use', nargs=1)
 in_out.add_argument('--architecture', required=False, choices=['pervaiz', 'he_sex', 'kawahara', 'he_58'],
                     default='pervaiz', help='BrainNetCNN architecture', nargs='?')
 in_out.add_argument("-t", "--tasks", required=False, type=str, default=[None],
                     help="name of task subdirectories in matrix_directory", nargs='+')
+in_out.add_argument('--subject_list', type=str, default=None,
+                    help='path to subject list file for HCP7Task FC data')
+in_out.add_argument('--task_config', type=str, default=None,
+                    help='JSON path for HCP7Task task config')
+in_out.add_argument('--fc_root', type=str, default=None,
+                    help='root directory of precomputed FC files for HCP7Task')
+in_out.add_argument('--roi_ids', type=str, default=None,
+                    help='comma-separated ROI ids (optional)')
+in_out.add_argument('--label_from_dir', action='store_true',
+                    help='use label directories (e.g., 0/1) for task-specific binary classification')
+in_out.add_argument('--dataset_type', choices=['hcp7task', 'hcptask'], default='hcp7task',
+                    help='dataset layout type for FC inputs')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')
@@ -95,43 +99,12 @@ def set_conditional_args():
 
 
 def exit_logic():
-    mat_dir = os.path.join(input_dir, uncond_args.matrix_directory)
-    task_dirs = [item for item in os.listdir(mat_dir) if os.path.isdir(os.path.join(mat_dir, item))]
-    subject_info = pd.read_csv(f'{input_dir}/{sub_info_dir}/{uncond_args.matrix_directory}_subject_info.csv')
-    info_columns = subject_info.columns.to_list()
-    multioutcome = len(uncond_args.outcome_names) > 1
-
-    for task in uncond_args.tasks:
-        task = task if task else mat_dir
-        if task not in task_dirs:
-            raise NotADirectoryError(f'\'{task}\' subdirectory is not available in {mat_dir}')
-
-    for task_dir in task_dirs:
-        task_dir = task_dir if task_dir else mat_dir
-        if not os.listdir(os.path.join(mat_dir, task_dir)):
-            raise FileNotFoundError(f'Please add data to \'/{mat_dir}/{task_dir}/\'')
-
-    if not all([outcome in info_columns for outcome in uncond_args.outcome_names]):
-        raise ValueError(f"Not all outcomes are available in {uncond_args.matrix_directory}_subject_info.csv")
-
-    if any(uncond_args.confound_names):
-        if not all([confound in info_columns for confound in uncond_args.confound_names]):
-            raise ValueError(f"Not all confounds are available in {uncond_args.matrix_directory}_subject_info.csv")
-
-    if uncond_args.deconfound_flavor != 'X0Y0' and not any(uncond_args.confound_names):
-        raise ValueError('If deconfounding is desired, please choose at least one confound')
-
-    if uncond_args.n_folds < 3:
-        raise ValueError(0, 'Cross validation folds must be >= 3')
-
-    if 'SVM' in uncond_args.model and multioutcome:
-        raise ValueError('SVM cannot handle multi-outcome problems')
-
-    if any([x in multiclass_variables for x in uncond_args.outcome_names]) and multioutcome:
-        raise ValueError('Only single-outcome prediction is supported for multiclass outcomes')
-
-    if uncond_args.architecture == 'he_sex' and uncond_args.outcome_names != ['Gender']:
-        raise ValueError('\'he_sex\' architecture only accommodates outcome \'Gender\'')
+    if not uncond_args.subject_list:
+        raise ValueError('HCP7Task FC dataset requires --subject_list')
+    if not uncond_args.task_config:
+        raise ValueError('HCP7Task FC dataset requires --task_config')
+    if not uncond_args.fc_root:
+        raise ValueError('HCP7Task FC dataset requires --fc_root')
 
     if uncond_args.start_fold < 0:
         raise ValueError('start_fold must be non-negative')
@@ -162,16 +135,8 @@ def train_models():
         print("\nTraining %s to predict %s from %s directory, with task(s) %s...\n" %
               (args.model, args.outcome_names, args.matrix_directory, args.tasks))
 
-    from preprocessing import load_data
-    pargs.update(load_data.main(pargs))
-
-    if args.model == ['BNCNN']:
-        from analysis import cv_train_BNCNN
-        cv_train_BNCNN.main(pargs)
-
-    elif any(model in args.model for model in ['SVM', 'FC90', 'ElasticNet']):
-        from analysis import cv_train_1D_networks
-        cv_train_1D_networks.main(pargs)
+    from analysis import train_fc_models
+    train_fc_models.main(pargs)
 
     print(f'\n{args.model[0]} training done!\n')
 
