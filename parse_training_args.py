@@ -26,6 +26,8 @@ in_out.add_argument('--roi_ids', type=str, default=None,
                     help='comma-separated ROI ids (optional)')
 in_out.add_argument('--label_from_dir', action='store_true',
                     help='use label directories (e.g., 0/1) for task-specific binary classification')
+in_out.add_argument('--dataset_type', choices=['hcp7task', 'hcptask'], default='hcp7task',
+                    help='dataset layout type for FC inputs')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')

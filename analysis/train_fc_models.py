@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from utils.hcp7task_dataset import HCP7TaskDataset
+from utils.hcptask_dataset import HCPTaskDataset
 from utils.util_args import models_dir, output_dir, performance_dir, seed
 from utils.util_classes import ClassFromDict, PervaizBNCNN, HeSexBNCNN, He58behaviorsBNCNN, KawaharaBNCNN
 from utils.util_funcs import ensure_subfolder_in_folder
@@ -66,31 +67,59 @@ def _build_datasets(params):
     roi_ids = params.roi_ids if getattr(params, "roi_ids", None) else None
     task_list = [task for task in params.tasks if task] if getattr(params, "tasks", None) else None
     label_from_dir = getattr(params, "label_from_dir", False)
+    dataset_type = getattr(params, "dataset_type", "hcp7task")
 
-    train_dataset = HCP7TaskDataset(
-        subject_list=train_subjects,
-        task_config=task_config,
-        fc_root=params.fc_root,
-        roi_ids=roi_ids,
-        task_list=task_list,
-        label_from_dir=label_from_dir,
-    )
-    val_dataset = HCP7TaskDataset(
-        subject_list=val_subjects,
-        task_config=task_config,
-        fc_root=params.fc_root,
-        roi_ids=roi_ids,
-        task_list=task_list,
-        label_from_dir=label_from_dir,
-    )
-    test_dataset = HCP7TaskDataset(
-        subject_list=test_subjects,
-        task_config=task_config,
-        fc_root=params.fc_root,
-        roi_ids=roi_ids,
-        task_list=task_list,
-        label_from_dir=label_from_dir,
-    )
+    if dataset_type == "hcptask":
+        if not task_list or len(task_list) != 1:
+            raise ValueError("HCPTask dataset requires exactly one task via -t.")
+        task_name = task_list[0]
+        train_dataset = HCPTaskDataset(
+            subject_list=train_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_name=task_name,
+        )
+        val_dataset = HCPTaskDataset(
+            subject_list=val_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_name=task_name,
+        )
+        test_dataset = HCPTaskDataset(
+            subject_list=test_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_name=task_name,
+        )
+        label_from_dir = True
+    else:
+        train_dataset = HCP7TaskDataset(
+            subject_list=train_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_list=task_list,
+            label_from_dir=label_from_dir,
+        )
+        val_dataset = HCP7TaskDataset(
+            subject_list=val_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_list=task_list,
+            label_from_dir=label_from_dir,
+        )
+        test_dataset = HCP7TaskDataset(
+            subject_list=test_subjects,
+            task_config=task_config,
+            fc_root=params.fc_root,
+            roi_ids=roi_ids,
+            task_list=task_list,
+            label_from_dir=label_from_dir,
+        )
 
     if label_from_dir:
         train_labels = [label.item() for _, label in train_dataset]
