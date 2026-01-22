@@ -143,6 +143,8 @@ class HCP7TaskDataset(Dataset):
             return int(label_value)
 
         rules = self.task_config.get("task_label_rules", {}).get(item["task"], {})
+        if "label_map" in rules:
+            return int(rules["label_map"][str(label_value)])
         if "label_to_id" in rules:
             return int(rules["label_to_id"][str(label_value)])
         if "labels" in rules:
