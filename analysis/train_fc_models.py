@@ -164,6 +164,11 @@ def _compute_epoch_metrics(y_true, y_pred, y_prob, num_classes):
     return metrics
 
 
+def _format_label_distribution(labels, num_classes):
+    counts = np.bincount(labels, minlength=num_classes)
+    return ", ".join([f"{idx}:{count}" for idx, count in enumerate(counts)])
+
+
 def _sklearn_predict_proba(estimator, X, num_classes):
     if hasattr(estimator, "predict_proba"):
         return estimator.predict_proba(X)
@@ -290,6 +295,8 @@ def _train_bncnn(params):
                             "recall": float("nan"), "f1": float("nan")}
         history[-1].update({f"test_{k}": v for k, v in test_metrics.items()})
         if params.verbose:
+            label_dist = _format_label_distribution(test_true.astype(int), num_classes) if test_true.size else "none"
+            print(f"Test label distribution: {label_dist}")
             _print_metrics("Test metrics", test_metrics)
 
         if val_loss < best_val_loss:
@@ -367,6 +374,8 @@ def _train_sklearn(params, model_name):
                 )
             )
             if params.verbose:
+                print(f"{model_name} epoch {epoch} test label distribution: "
+                      f"{_format_label_distribution(y_test.astype(int), num_classes)}")
                 _print_metrics(f"{model_name} epoch {epoch} [test]", test_metrics)
     else:
         net.fit(X_train, y_train)
@@ -381,6 +390,8 @@ def _train_sklearn(params, model_name):
         test_metrics = _compute_epoch_metrics(y_test, test_pred, test_prob, num_classes)
         history.append(dict(epoch=0, train=train_metrics, val=val_metrics, test=test_metrics))
         if params.verbose:
+            print(f"{model_name} test label distribution: "
+                  f"{_format_label_distribution(y_test.astype(int), num_classes)}")
             _print_metrics(f"{model_name} [test]", test_metrics)
 
     outputs = dict(
