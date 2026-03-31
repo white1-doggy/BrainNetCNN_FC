@@ -3,93 +3,159 @@ import os
 from collections import Counter
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
 
-def _parse_label(filename):
-    return filename.split('_')[0]
+def _normalize_subject_token(subject):
+    subject = str(subject).strip()
+    return subject[:-4] if subject.endswith('.npy') else subject
 
 
-def _load_or_create_splits(samples, labels, n_folds, split_txt_path):
+def _match_file_by_subject(subject, all_files):
+    exact = f'{subject}.npy'
+    if exact in all_files:
+        return exact
+
+    prefix = f'{subject}_'
+    hits = [f for f in all_files if f.startswith(prefix)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        hits.sort()
+        return hits[0]
+    return None
+
+
+def _balance_binary(files, labels, class_a, class_b):
+    files = np.array(files)
+    labels = np.array(labels)
+
+    idx_a = np.where(labels == class_a)[0]
+    idx_b = np.where(labels == class_b)[0]
+    n = min(len(idx_a), len(idx_b))
+    if n == 0:
+        raise ValueError(f'Cannot balance: {class_a}={len(idx_a)}, {class_b}={len(idx_b)}')
+
+    rng = np.random.RandomState(1234)
+    keep_a = rng.choice(idx_a, size=n, replace=False)
+    keep_b = rng.choice(idx_b, size=n, replace=False)
+    keep = np.concatenate([keep_a, keep_b])
+    rng.shuffle(keep)
+
+    return files[keep].tolist(), labels[keep].tolist()
+
+
+def _load_or_create_split(samples, labels, split_txt_path, test_size, val_size):
     if split_txt_path and os.path.isfile(split_txt_path):
         with open(split_txt_path, 'r', encoding='utf-8') as f:
-            return json.load(f), split_txt_path
+            loaded = json.load(f)
+        if all(k in loaded for k in ['train', 'val', 'test']):
+            return loaded, split_txt_path
+        if '0' in loaded and all(k in loaded['0'] for k in ['train', 'val', 'test']):
+            return loaded['0'], split_txt_path
+        raise ValueError(f'Invalid split file format: {split_txt_path}')
 
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=1234)
-    labels = np.array(labels)
     samples = np.array(samples)
+    labels = np.array(labels)
 
-    fold_splits = {}
-    for fold, (trainval_idx, test_idx) in enumerate(skf.split(samples, labels)):
-        trainval_labels = labels[trainval_idx]
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=1234 + fold)
-        train_rel, val_rel = next(sss.split(trainval_idx, trainval_labels))
+    trainval_x, test_x, trainval_y, test_y = train_test_split(
+        samples, labels, test_size=test_size, random_state=1234, stratify=labels
+    )
 
-        train_idx = trainval_idx[train_rel]
-        val_idx = trainval_idx[val_rel]
+    val_ratio_in_trainval = val_size / (1 - test_size)
+    train_x, val_x, train_y, val_y = train_test_split(
+        trainval_x, trainval_y, test_size=val_ratio_in_trainval, random_state=5678, stratify=trainval_y
+    )
 
-        fold_splits[str(fold)] = dict(
-            train=samples[train_idx].tolist(),
-            val=samples[val_idx].tolist(),
-            test=samples[test_idx].tolist(),
-        )
+    split = dict(
+        train=train_x.tolist(),
+        val=val_x.tolist(),
+        test=test_x.tolist(),
+    )
 
-    out_path = split_txt_path or os.path.join(os.getcwd(), 'adni_splits.txt')
+    out_path = split_txt_path or os.path.join(os.getcwd(), 'adni_split_single_run.txt')
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(out_path, 'w', encoding='utf-8') as f:
-        json.dump(fold_splits, f, indent=2)
+        json.dump(split, f, indent=2)
 
-    return fold_splits, out_path
+    return split, out_path
 
 
 def main(args):
     signal_dir = args['adni_signal_dir']
     chosen_classes = args['adni_classes']
-    n_folds = args['n_folds']
+    class_a, class_b = chosen_classes
 
-    npy_files = [f for f in os.listdir(signal_dir) if f.endswith('.npy')]
-    npy_files.sort()
+    csv_path = args['adni_label_csv']
+    label_df = pd.read_csv(csv_path)
+    if not {'subject', 'label'}.issubset(set(label_df.columns)):
+        raise ValueError('adni_label_csv must include columns: subject, label')
 
-    labels = [_parse_label(f) for f in npy_files]
-    class_counts = Counter(labels)
-    print('\nADNI class counts (all files):')
-    for klass, count in sorted(class_counts.items()):
-        print(f'  {klass}: {count}')
+    all_npy_files = [f for f in os.listdir(signal_dir) if f.endswith('.npy')]
+    all_npy_files.sort()
 
-    selected = [(f, y) for f, y in zip(npy_files, labels) if y in chosen_classes]
-    if not selected:
-        raise ValueError(f'No files found for selected classes: {chosen_classes}')
+    matched_files, matched_labels = [], []
+    missing_subjects = []
 
-    selected_files = [os.path.join(signal_dir, f) for f, _ in selected]
-    selected_labels = [y for _, y in selected]
+    for _, row in label_df.iterrows():
+        subject = _normalize_subject_token(row['subject'])
+        label = str(row['label']).strip()
+        if label not in chosen_classes:
+            continue
 
-    selected_counts = Counter(selected_labels)
-    print('\nSelected binary task class counts:')
+        matched = _match_file_by_subject(subject, all_npy_files)
+        if matched is None:
+            missing_subjects.append(subject)
+            continue
+
+        matched_files.append(os.path.join(signal_dir, matched))
+        matched_labels.append(label)
+
+    if missing_subjects:
+        print(f'\nWarning: {len(missing_subjects)} subjects from csv were not matched to npy files.')
+
+    if not matched_files:
+        raise ValueError('No ADNI files matched from csv subject/label mapping for selected classes')
+
+    print('\nSelected class counts before balancing:')
+    before_counts = Counter(matched_labels)
     for klass in chosen_classes:
-        print(f'  {klass}: {selected_counts.get(klass, 0)}')
+        print(f'  {klass}: {before_counts.get(klass, 0)}')
 
-    label_to_int = {chosen_classes[0]: 0, chosen_classes[1]: 1}
-    int_to_label = {v: k for k, v in label_to_int.items()}
+    balanced_files, balanced_labels = _balance_binary(matched_files, matched_labels, class_a, class_b)
 
-    fold_splits, used_split_txt_path = _load_or_create_splits(
-        samples=selected_files,
-        labels=selected_labels,
-        n_folds=n_folds,
-        split_txt_path=args.get('split_txt_path')
+    print('\nSelected class counts after balancing:')
+    after_counts = Counter(balanced_labels)
+    for klass in chosen_classes:
+        print(f'  {klass}: {after_counts.get(klass, 0)}')
+
+    split, used_split_txt_path = _load_or_create_split(
+        samples=balanced_files,
+        labels=balanced_labels,
+        split_txt_path=args.get('split_txt_path'),
+        test_size=args.get('test_size', 0.2),
+        val_size=args.get('val_size', 0.1),
     )
 
     print(f'\nUsing split file: {used_split_txt_path}')
 
+    label_to_int = {class_a: 0, class_b: 1}
+    int_to_label = {0: class_a, 1: class_b}
+
     return dict(
-        adni_files=selected_files,
-        adni_labels=selected_labels,
+        adni_files=balanced_files,
+        adni_labels=balanced_labels,
         label_to_int=label_to_int,
         int_to_label=int_to_label,
-        adni_fold_splits=fold_splits,
+        adni_fold_splits={'0': split},
         split_txt_path=used_split_txt_path,
         outcome_names=chosen_classes,
+        n_folds=1,
+        start_fold=0,
+        end_fold=1,
     )
 
 

@@ -31,6 +31,8 @@ in_out.add_argument('--adni_signal_dir', required=False, nargs='?',
                     help='directory containing ADNI .npy files shaped N*T')
 in_out.add_argument('--adni_classes', required=False, nargs=2,
                     help='two class labels (filename prefixes before first underscore) for binary classification')
+in_out.add_argument('--adni_label_csv', required=False, nargs='?',
+                    help='csv with columns [subject, label] used to map ADNI files to labels')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')
@@ -77,6 +79,10 @@ epochs.add_argument('--crop_length', default=100, type=int, nargs='?',
                     help='sequence length (frames) to crop from ADNI signal per sample')
 epochs.add_argument('--split_txt_path', default=None, nargs='?',
                     help='path to ADNI split txt file; generated if missing')
+epochs.add_argument('--test_size', default=0.2, type=float, nargs='?',
+                    help='test split proportion for ADNI single-run training')
+epochs.add_argument('--val_size', default=0.1, type=float, nargs='?',
+                    help='validation split proportion for ADNI single-run training')
 
 # hardware parameters
 hardware = parser.add_argument_group('hardware', 'hardware params')
@@ -114,10 +120,21 @@ def exit_logic():
     if uncond_args.input_type == 'adni_signal':
         if not uncond_args.adni_signal_dir or not os.path.isdir(uncond_args.adni_signal_dir):
             raise NotADirectoryError('For adni_signal input, --adni_signal_dir must be a valid directory')
+        if not uncond_args.adni_label_csv or not os.path.isfile(uncond_args.adni_label_csv):
+            raise FileNotFoundError('For adni_signal input, --adni_label_csv must be a valid csv file')
         if not uncond_args.adni_classes or len(uncond_args.adni_classes) != 2:
             raise ValueError('For adni_signal input, --adni_classes must include exactly two labels')
         if uncond_args.model != ['BNCNN']:
             raise ValueError('ADNI signal mode currently supports BNCNN training only')
+        if not 0 < uncond_args.test_size < 1:
+            raise ValueError('--test_size must be in (0,1)')
+        if not 0 < uncond_args.val_size < 1:
+            raise ValueError('--val_size must be in (0,1)')
+        if uncond_args.test_size + uncond_args.val_size >= 1:
+            raise ValueError('test_size + val_size must be < 1')
+        uncond_args.n_folds = 1
+        uncond_args.start_fold = 0
+        uncond_args.end_fold = 1
         return
 
     if not uncond_args.matrix_directory:
