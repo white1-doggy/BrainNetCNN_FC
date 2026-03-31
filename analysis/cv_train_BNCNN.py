@@ -13,6 +13,7 @@ from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.metrics import mean_absolute_error as mae
 from torch.autograd import Variable
+from tqdm import tqdm
 
 from utils.util_args import set_names, metrics, models_dir, performance_dir, output_dir
 from utils.util_classes import ClassFromDict, PervaizBNCNN, HeSexBNCNN, He58behaviorsBNCNN, KawaharaBNCNN, HCPDataset, \
@@ -20,8 +21,160 @@ from utils.util_classes import ClassFromDict, PervaizBNCNN, HeSexBNCNN, He58beha
 from utils.util_funcs import ensure_subfolder_in_folder, get_training_params
 
 
+def compute_fc_from_signal(signal_2d):
+    fc = np.corrcoef(signal_2d)
+    fc = np.nan_to_num(fc, nan=0.0, posinf=0.0, neginf=0.0)
+    return fc.astype(np.float32)
+
+
+class ADNIRandomCropDataset(torch.utils.data.Dataset):
+    def __init__(self, files, labels, label_to_int, crop_length):
+        self.files = files
+        self.labels = labels
+        self.label_to_int = label_to_int
+        self.crop_length = crop_length
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        ts = np.load(self.files[idx]).astype(np.float32)
+        n_roi, n_time = ts.shape
+        if n_time < self.crop_length:
+            raise ValueError(f'{os.path.basename(self.files[idx])} has {n_time} frames, crop_length={self.crop_length}')
+        start = np.random.randint(0, n_time - self.crop_length + 1)
+        fc = compute_fc_from_signal(ts[:, start:start + self.crop_length])
+        x = torch.FloatTensor(fc[None, :, :])
+        y = torch.FloatTensor([self.label_to_int[self.labels[idx]]])
+        return x, y
+
+
+def train_adni_bncnn(params):
+    rundate = datetime.datetime.now().strftime('%b_%d_%Y_%H_%M_%S')
+    torch.set_num_threads(params.n_threads)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    use_cuda = torch.cuda.is_available()
+
+    net_preamble = '_'.join([params.model[0], rundate])
+    for folder in [performance_dir, models_dir, output_dir]:
+        ensure_subfolder_in_folder(folder=folder, subfolder=params.model[0])
+
+    fold_keys = sorted(params.adni_fold_splits.keys(), key=int)
+    for fold_key in fold_keys[params.start_fold:params.end_fold]:
+        fold = int(fold_key)
+        split = params.adni_fold_splits[fold_key]
+        train_files = split['train']
+        val_files = split['val']
+        test_files = split['test']
+
+        path_to_label = dict(zip(params.adni_files, params.adni_labels))
+        train_labels = [path_to_label[x] for x in train_files]
+        val_labels = [path_to_label[x] for x in val_files]
+        test_labels = [path_to_label[x] for x in test_files]
+
+        print(f'\nTraining ADNI fold {fold}')
+        print(f'  train/val/test subjects: {len(train_files)}/{len(val_files)}/{len(test_files)}')
+
+        trainset = ADNIRandomCropDataset(train_files, train_labels, params.label_to_int, params.crop_length)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=8, shuffle=True, pin_memory=True)
+
+        # instantiate from first sample
+        sample_x, _ = trainset[0]
+        sample_x = sample_x.unsqueeze(0)
+
+        switcher = dict(kawahara=KawaharaBNCNN,
+                        he_sex=HeSexBNCNN,
+                        pervaiz=PervaizBNCNN,
+                        he_58=He58behaviorsBNCNN)
+        net_cls = switcher.get(params.architecture, PervaizBNCNN)
+
+        class ADNIShape:
+            multiclass = True
+            n_classes = 2
+            n_outcomes = 1
+
+        net = net_cls(sample_x, ADNIShape())
+        if use_cuda:
+            net = net.to(device)
+            cudnn.benchmark = True
+
+        optimizer = torch.optim.SGD(net.parameters(), lr=params.lr, momentum=params.momentum, nesterov=True,
+                                    weight_decay=params.wd)
+        criterion = nn.BCELoss()
+
+        def evaluate_subjects(files, labels):
+            subject_votes = []
+            true_labels = []
+            net.eval()
+            for fp, y_name in zip(files, labels):
+                ts = np.load(fp).astype(np.float32)
+                n_time = ts.shape[1]
+                if n_time < params.crop_length:
+                    continue
+                starts = range(0, n_time - params.crop_length + 1)
+                preds = []
+                for start in starts:
+                    fc = compute_fc_from_signal(ts[:, start:start + params.crop_length])
+                    xin = torch.FloatTensor(fc[None, None, :, :])
+                    if use_cuda:
+                        xin = xin.to(device)
+                    with torch.no_grad():
+                        prob = net(xin).detach().cpu().numpy().squeeze()
+                    if np.ndim(prob) == 0:
+                        pred = int(prob >= 0.5)
+                    else:
+                        pred = int(np.argmax(prob))
+                    preds.append(pred)
+                vote = int(np.mean(preds) >= 0.5)
+                subject_votes.append(vote)
+                true_labels.append(params.label_to_int[y_name])
+            acc = balanced_accuracy_score(true_labels, subject_votes)
+            return acc
+
+        best_state = None
+        best_test_acc = -np.inf
+        best_output = {}
+
+        for epoch in tqdm(range(params.n_epochs), desc=f'fold {fold} epochs'):
+            net.train()
+            running_loss = 0.0
+            for inputs, targets in trainloader:
+                if use_cuda:
+                    inputs, targets = inputs.to(device), targets.to(device)
+                optimizer.zero_grad()
+                outputs = net(inputs)
+                if outputs.ndim > 1 and outputs.shape[-1] == 2:
+                    targets = torch.nn.functional.one_hot(targets.long().squeeze(-1), num_classes=2).float()
+                loss = criterion(outputs, targets.view(outputs.size()))
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=params.max_norm)
+                optimizer.step()
+                running_loss += loss.item()
+
+            val_acc = evaluate_subjects(val_files, val_labels)
+            test_acc = evaluate_subjects(test_files, test_labels)
+            print(f'Epoch {epoch:03d} | train_loss={running_loss / max(1, len(trainloader)):.4f} '
+                  f'| val_bacc={val_acc:.4f} | test_bacc={test_acc:.4f}')
+
+            if test_acc > best_test_acc:
+                best_test_acc = test_acc
+                best_state = net.state_dict()
+                best_output = dict(best_test_balanced_accuracy=test_acc, best_val_balanced_accuracy=val_acc, epoch=epoch)
+
+        net_path = os.path.join(models_dir, params.model[0], '_'.join([net_preamble + f'fold{fold}_net.pt']))
+        torch.save(best_state, net_path)
+        output_path = os.path.join(output_dir, params.model[0], '_'.join([net_preamble, f'fold{fold}_output.pkl']))
+        pickle.dump(best_output, open(output_path, "wb"))
+
+    print(f'ADNI training done. Splits file: {params.split_txt_path}')
+    return dict()
+
+
 def main(args):
     params = ClassFromDict(args)
+    if hasattr(params, 'adni_fold_splits'):
+        return train_adni_bncnn(params)
+
     X = params.X
     Y = params.Y
     rundate = datetime.datetime.now().strftime('%b_%d_%Y_%H_%M_%S')
