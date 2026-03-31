@@ -15,8 +15,9 @@ parser.add_argument("-v", "--verbose", help="increase output verbosity", action=
 
 # degrees of freedom in the model input/output
 in_out = parser.add_argument_group('in_out', 'model I/O params')
-in_out.add_argument("-on", "--outcome_names", required=True, type=str, nargs='+', help="the outcome to predict")
-in_out.add_argument("-md", "--matrix_directory", required=True, nargs='?',
+in_out.add_argument("-on", "--outcome_names", required=False, type=str, nargs='+', default=None,
+                    help="the outcome to predict")
+in_out.add_argument("-md", "--matrix_directory", required=False, nargs='?',
                     help='matrix directory containing matrix input data')
 in_out.add_argument("-mo", "--model", required=True, choices=['BNCNN', 'SVM', 'FC90', 'ElasticNet'],
                     type=str, help='the model to use', nargs=1)
@@ -24,6 +25,15 @@ in_out.add_argument('--architecture', required=False, choices=['pervaiz', 'he_se
                     default='pervaiz', help='BrainNetCNN architecture', nargs='?')
 in_out.add_argument("-t", "--tasks", required=False, type=str, default=[None],
                     help="name of task subdirectories in matrix_directory", nargs='+')
+
+in_out.add_argument('--input_type', choices=['matrix', 'adni_signal'], default='matrix', nargs='?',
+                    help='training input type: matrix text files or ADNI N*T signal npy files')
+in_out.add_argument('--adni_signal_dir', required=False, nargs='?',
+                    help='directory containing ADNI .npy files shaped N*T')
+in_out.add_argument('--adni_classes', required=False, nargs=2,
+                    help='two class labels (filename prefixes before first underscore) for binary classification')
+in_out.add_argument('--adni_label_csv', required=False, nargs='?',
+                    help='csv with columns [subject, label] used to map ADNI files to labels')
 
 # data transformation args
 transforms = parser.add_argument_group('transforms', 'data transformation params')
@@ -66,6 +76,12 @@ epochs.add_argument('--ep_int', type=int, default=10, help='with early stopping,
                     nargs='?')
 epochs.add_argument('--min_train_epochs', default=50, type=int, help='mininmum epochs to train before early stopping',
                     nargs='?')
+epochs.add_argument('--crop_length', default=100, type=int, nargs='?',
+                    help='sequence length (frames) to crop from ADNI signal per sample')
+epochs.add_argument('--split_txt_path', default='split.txt', nargs='?',
+                    help='path to ADNI split txt file; generated if missing')
+epochs.add_argument('--test_size', default=0.2, type=float, nargs='?',
+                    help='test split proportion for ADNI single-run training')
 
 # hardware parameters
 hardware = parser.add_argument_group('hardware', 'hardware params')
@@ -78,7 +94,10 @@ uncond_args = parser.parse_args()  # unconditional args
 def set_conditional_args():
     multi_input = len(uncond_args.tasks) != 1
 
-    if any(uncond_args.tasks):
+    if uncond_args.input_type == 'adni_signal':
+        matrix_labels = ['adni_dynamic_fc']
+        uncond_args.tasks = ['adni_signal']
+    elif any(uncond_args.tasks):
         matrix_labels = ['_'.join([uncond_args.matrix_directory, task]) for task in uncond_args.tasks if task]
     else:
         matrix_labels = uncond_args.matrix_directory
@@ -95,11 +114,33 @@ def set_conditional_args():
 
 
 def exit_logic():
+    multioutcome = len(uncond_args.outcome_names) > 1 if uncond_args.outcome_names else False
+
+    if uncond_args.input_type == 'adni_signal':
+        if not uncond_args.adni_signal_dir or not os.path.isdir(uncond_args.adni_signal_dir):
+            raise NotADirectoryError('For adni_signal input, --adni_signal_dir must be a valid directory')
+        if not uncond_args.adni_label_csv or not os.path.isfile(uncond_args.adni_label_csv):
+            raise FileNotFoundError('For adni_signal input, --adni_label_csv must be a valid csv file')
+        if uncond_args.adni_classes and len(uncond_args.adni_classes) != 2:
+            raise ValueError('If provided, --adni_classes must include exactly two labels')
+        if uncond_args.model != ['BNCNN']:
+            raise ValueError('ADNI signal mode currently supports BNCNN training only')
+        if not 0 < uncond_args.test_size < 1:
+            raise ValueError('--test_size must be in (0,1)')
+        uncond_args.n_folds = 1
+        uncond_args.start_fold = 0
+        uncond_args.end_fold = 1
+        return
+
+    if not uncond_args.matrix_directory:
+        raise ValueError('matrix_directory is required when input_type is matrix')
+    if not uncond_args.outcome_names:
+        raise ValueError('outcome_names (-on) is required when input_type is matrix')
+
     mat_dir = os.path.join(input_dir, uncond_args.matrix_directory)
     task_dirs = [item for item in os.listdir(mat_dir) if os.path.isdir(os.path.join(mat_dir, item))]
     subject_info = pd.read_csv(f'{input_dir}/{sub_info_dir}/{uncond_args.matrix_directory}_subject_info.csv')
     info_columns = subject_info.columns.to_list()
-    multioutcome = len(uncond_args.outcome_names) > 1
 
     for task in uncond_args.tasks:
         task = task if task else mat_dir
@@ -162,8 +203,12 @@ def train_models():
         print("\nTraining %s to predict %s from %s directory, with task(s) %s...\n" %
               (args.model, args.outcome_names, args.matrix_directory, args.tasks))
 
-    from preprocessing import load_data
-    pargs.update(load_data.main(pargs))
+    if args.input_type == 'adni_signal':
+        from preprocessing import load_adni_data
+        pargs.update(load_adni_data.main(pargs))
+    else:
+        from preprocessing import load_data
+        pargs.update(load_data.main(pargs))
 
     if args.model == ['BNCNN']:
         from analysis import cv_train_BNCNN
