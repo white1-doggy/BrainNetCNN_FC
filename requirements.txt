@@ -9,3 +9,4 @@ torchvision==0.4.0
 pandas==0.25.3
 xarray==0.15.0
 h5py
+tqdm
