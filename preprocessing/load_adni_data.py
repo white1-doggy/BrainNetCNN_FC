@@ -46,35 +46,29 @@ def _balance_binary(files, labels, class_a, class_b):
     return files[keep].tolist(), labels[keep].tolist()
 
 
-def _load_or_create_split(samples, labels, split_txt_path, test_size, val_size):
+def _load_or_create_split(samples, labels, split_txt_path, test_size):
     if split_txt_path and os.path.isfile(split_txt_path):
         with open(split_txt_path, 'r', encoding='utf-8') as f:
             loaded = json.load(f)
-        if all(k in loaded for k in ['train', 'val', 'test']):
+        if all(k in loaded for k in ['train', 'test']):
             return loaded, split_txt_path
-        if '0' in loaded and all(k in loaded['0'] for k in ['train', 'val', 'test']):
+        if '0' in loaded and all(k in loaded['0'] for k in ['train', 'test']):
             return loaded['0'], split_txt_path
         raise ValueError(f'Invalid split file format: {split_txt_path}')
 
     samples = np.array(samples)
     labels = np.array(labels)
 
-    trainval_x, test_x, trainval_y, test_y = train_test_split(
+    train_x, test_x, train_y, test_y = train_test_split(
         samples, labels, test_size=test_size, random_state=1234, stratify=labels
-    )
-
-    val_ratio_in_trainval = val_size / (1 - test_size)
-    train_x, val_x, train_y, val_y = train_test_split(
-        trainval_x, trainval_y, test_size=val_ratio_in_trainval, random_state=5678, stratify=trainval_y
     )
 
     split = dict(
         train=train_x.tolist(),
-        val=val_x.tolist(),
         test=test_x.tolist(),
     )
 
-    out_path = split_txt_path or os.path.join(os.getcwd(), 'adni_split_single_run.txt')
+    out_path = split_txt_path or os.path.join(os.getcwd(), 'split.txt')
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -86,13 +80,22 @@ def _load_or_create_split(samples, labels, split_txt_path, test_size, val_size):
 
 def main(args):
     signal_dir = args['adni_signal_dir']
-    chosen_classes = args['adni_classes']
-    class_a, class_b = chosen_classes
 
     csv_path = args['adni_label_csv']
     label_df = pd.read_csv(csv_path)
     if not {'subject', 'label'}.issubset(set(label_df.columns)):
         raise ValueError('adni_label_csv must include columns: subject, label')
+
+    if args.get('adni_classes'):
+        chosen_classes = list(args['adni_classes'])
+    else:
+        classes_from_csv = sorted({str(x).strip() for x in label_df['label'].dropna().tolist()})
+        if len(classes_from_csv) != 2:
+            raise ValueError(f'CSV label has {len(classes_from_csv)} classes. '
+                             f'Please provide --adni_classes for binary task selection.')
+        chosen_classes = classes_from_csv
+
+    class_a, class_b = chosen_classes
 
     all_npy_files = [f for f in os.listdir(signal_dir) if f.endswith('.npy')]
     all_npy_files.sort()
@@ -137,7 +140,6 @@ def main(args):
         labels=balanced_labels,
         split_txt_path=args.get('split_txt_path'),
         test_size=args.get('test_size', 0.2),
-        val_size=args.get('val_size', 0.1),
     )
 
     print(f'\nUsing split file: {used_split_txt_path}')
@@ -150,7 +152,7 @@ def main(args):
         adni_labels=balanced_labels,
         label_to_int=label_to_int,
         int_to_label=int_to_label,
-        adni_fold_splits={'0': split},
+        adni_fold_splits={'0': dict(train=split['train'], val=[], test=split['test'])},
         split_txt_path=used_split_txt_path,
         outcome_names=chosen_classes,
         n_folds=1,

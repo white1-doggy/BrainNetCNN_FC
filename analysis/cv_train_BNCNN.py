@@ -103,6 +103,8 @@ def train_adni_bncnn(params):
         criterion = nn.BCELoss()
 
         def evaluate_subjects(files, labels):
+            if len(files) == 0:
+                return np.nan
             subject_votes = []
             true_labels = []
             net.eval()

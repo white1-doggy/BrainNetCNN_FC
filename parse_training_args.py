@@ -15,7 +15,8 @@ parser.add_argument("-v", "--verbose", help="increase output verbosity", action=
 
 # degrees of freedom in the model input/output
 in_out = parser.add_argument_group('in_out', 'model I/O params')
-in_out.add_argument("-on", "--outcome_names", required=True, type=str, nargs='+', help="the outcome to predict")
+in_out.add_argument("-on", "--outcome_names", required=False, type=str, nargs='+', default=None,
+                    help="the outcome to predict")
 in_out.add_argument("-md", "--matrix_directory", required=False, nargs='?',
                     help='matrix directory containing matrix input data')
 in_out.add_argument("-mo", "--model", required=True, choices=['BNCNN', 'SVM', 'FC90', 'ElasticNet'],
@@ -77,12 +78,10 @@ epochs.add_argument('--min_train_epochs', default=50, type=int, help='mininmum e
                     nargs='?')
 epochs.add_argument('--crop_length', default=100, type=int, nargs='?',
                     help='sequence length (frames) to crop from ADNI signal per sample')
-epochs.add_argument('--split_txt_path', default=None, nargs='?',
+epochs.add_argument('--split_txt_path', default='split.txt', nargs='?',
                     help='path to ADNI split txt file; generated if missing')
 epochs.add_argument('--test_size', default=0.2, type=float, nargs='?',
                     help='test split proportion for ADNI single-run training')
-epochs.add_argument('--val_size', default=0.1, type=float, nargs='?',
-                    help='validation split proportion for ADNI single-run training')
 
 # hardware parameters
 hardware = parser.add_argument_group('hardware', 'hardware params')
@@ -115,23 +114,19 @@ def set_conditional_args():
 
 
 def exit_logic():
-    multioutcome = len(uncond_args.outcome_names) > 1
+    multioutcome = len(uncond_args.outcome_names) > 1 if uncond_args.outcome_names else False
 
     if uncond_args.input_type == 'adni_signal':
         if not uncond_args.adni_signal_dir or not os.path.isdir(uncond_args.adni_signal_dir):
             raise NotADirectoryError('For adni_signal input, --adni_signal_dir must be a valid directory')
         if not uncond_args.adni_label_csv or not os.path.isfile(uncond_args.adni_label_csv):
             raise FileNotFoundError('For adni_signal input, --adni_label_csv must be a valid csv file')
-        if not uncond_args.adni_classes or len(uncond_args.adni_classes) != 2:
-            raise ValueError('For adni_signal input, --adni_classes must include exactly two labels')
+        if uncond_args.adni_classes and len(uncond_args.adni_classes) != 2:
+            raise ValueError('If provided, --adni_classes must include exactly two labels')
         if uncond_args.model != ['BNCNN']:
             raise ValueError('ADNI signal mode currently supports BNCNN training only')
         if not 0 < uncond_args.test_size < 1:
             raise ValueError('--test_size must be in (0,1)')
-        if not 0 < uncond_args.val_size < 1:
-            raise ValueError('--val_size must be in (0,1)')
-        if uncond_args.test_size + uncond_args.val_size >= 1:
-            raise ValueError('test_size + val_size must be < 1')
         uncond_args.n_folds = 1
         uncond_args.start_fold = 0
         uncond_args.end_fold = 1
@@ -139,6 +134,8 @@ def exit_logic():
 
     if not uncond_args.matrix_directory:
         raise ValueError('matrix_directory is required when input_type is matrix')
+    if not uncond_args.outcome_names:
+        raise ValueError('outcome_names (-on) is required when input_type is matrix')
 
     mat_dir = os.path.join(input_dir, uncond_args.matrix_directory)
     task_dirs = [item for item in os.listdir(mat_dir) if os.path.isdir(os.path.join(mat_dir, item))]
